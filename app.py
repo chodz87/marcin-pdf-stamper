@@ -104,9 +104,10 @@ def adaptive_crop_extra(text: str):
         return (EXTRA_CROP_LR*mm, EXTRA_CROP_LR*mm, EXTRA_CROP_T*mm, EXTRA_CROP_B*mm)
     return (0,0,0,0)
 
-def annotate_pdf_web(pdf_bytes, xlsx_bytes, max_per_sheet):
+def _compose_once(pdf_bytes, xlsx_bytes, max_per_sheet):
     lookup, excel_numbers = read_excel_lookup(io.BytesIO(xlsx_bytes))
     reader = PdfReader(io.BytesIO(pdf_bytes))
+
     groups, page_meta, page_text_cache = {}, {}, {}
     for i, _ in enumerate(reader.pages):
         page_text = extract_text(io.BytesIO(pdf_bytes), page_numbers=[i]) or ""
@@ -136,6 +137,7 @@ def annotate_pdf_web(pdf_bytes, xlsx_bytes, max_per_sheet):
         return (min(nums) if nums else 10**9, k)
     ordered_keys = sorted(groups.keys(), key=key_sort)
 
+    from reportlab.lib.pagesizes import A4
     W, H = A4
     margin_x = SIDE_MARGIN_MM * mm
     top_margin = TOP_MARGIN_MM * mm
@@ -149,7 +151,8 @@ def annotate_pdf_web(pdf_bytes, xlsx_bytes, max_per_sheet):
     base_crop_b = BASE_CROP_B * mm
 
     writer = PdfWriter()
-    writer.add_metadata({"/Producer": "Kersia PDF Stamper Web v1.2"})
+    writer.add_metadata({"/Producer": "Kersia PDF Stamper Web v1.3 (compose)"})
+    from PyPDF2._page import PageObject
 
     for gkey in ordered_keys:
         idxs = groups[gkey]
@@ -160,14 +163,10 @@ def annotate_pdf_web(pdf_bytes, xlsx_bytes, max_per_sheet):
                 sw = float(reader.pages[idx].mediabox.right - reader.pages[idx].mediabox.left)
                 sh = float(reader.pages[idx].mediabox.top - reader.pages[idx].mediabox.bottom)
                 ex_l, ex_r, ex_t, ex_b = adaptive_crop_extra(page_text_cache[idx])
-                cl = base_crop_l + ex_l
-                cr = base_crop_r + ex_r
-                ct = base_crop_t + ex_t
-                cb = base_crop_b + ex_b
-                cw = max(10.0, sw - cl - cr)
-                ch = max(10.0, sh - ct - cb)
-                s = avail_w / cw
-                dh = s * ch
+                cl = base_crop_l + ex_l; cr = base_crop_r + ex_r
+                ct = base_crop_t + ex_t; cb = base_crop_b + ex_b
+                cw = max(10.0, sw - cl - cr); ch = max(10.0, sh - ct - cb)
+                s  = avail_w / cw; dh = s * ch
                 items.append((idx, cl, cr, ct, cb, s, dh))
                 total_h += dh
             total_h += gap * max(0, len(batch)-1)
@@ -178,8 +177,7 @@ def annotate_pdf_web(pdf_bytes, xlsx_bytes, max_per_sheet):
 
             y = H - top_margin
             for (idx, cl, cr, ct, cb, s, dh) in items:
-                s *= down
-                dh *= down
+                s *= down; dh *= down
                 x = margin_x - s * cl
                 y2 = y - dh
                 tmp = PageObject.create_blank_page(writer, W, H)
@@ -192,13 +190,27 @@ def annotate_pdf_web(pdf_bytes, xlsx_bytes, max_per_sheet):
             ov = PdfReader(io.BytesIO(make_stamp_overlay_bytes(W, H, *page_meta[batch[0]])))
             base_page.merge_page(ov.pages[0])
 
-    out_buf = io.BytesIO()
-    writer.write(out_buf)
-    return out_buf.getvalue()
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
 
-st.set_page_config(page_title="Kersia PDF Stamper v1.2", page_icon="🧰", layout="centered")
-st.title("Kersia — PDF Stamper (Adobe OK)")
-st.caption("Nowa wersja zgodna z Adobe Reader")
+def annotate_pdf_web(pdf_bytes, xlsx_bytes, max_per_sheet):
+    # 1) złożenie
+    composed = _compose_once(pdf_bytes, xlsx_bytes, max_per_sheet)
+    # 2) SANITIZE: odczyt bez strict + przepisanie stron do świeżego writer'a
+    r = PdfReader(io.BytesIO(composed), strict=False)
+    w = PdfWriter()
+    w.add_metadata({"/Producer": "Kersia PDF Stamper Web v1.3 (sanitize)"})
+    for p in r.pages:
+        w.add_page(p)
+    out = io.BytesIO()
+    w.write(out)
+    return out.getvalue()
+
+# -------- UI --------
+st.set_page_config(page_title="Kersia PDF Stamper v1.3", page_icon="🧰", layout="centered")
+st.title("Kersia — PDF Stamper (Adobe OK v1.3)")
+st.caption("Dodatkowe 'sanitize' pliku wynikowego (naprawia błąd 14).")
 
 excel_file = st.file_uploader("Plik Excel:", type=["xlsx", "xlsm", "xls"])
 pdf_file = st.file_uploader("Plik PDF:", type=["pdf"])
