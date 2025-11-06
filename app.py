@@ -1,49 +1,70 @@
-import io, re, os
-from datetime import datetime
-from typing import List, Tuple
+import io, os, re
+from datetime import datetime, date
+from typing import List, Tuple, Any
 
 import streamlit as st
 from openpyxl import load_workbook
 from PyPDF2 import PdfReader, PdfWriter
 from PyPDF2._page import PageObject
 from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
-# ---- Streamlit UI ----
 st.set_page_config(page_title="Kersia PDF Stamper", page_icon="🧰", layout="centered")
 st.title("Kersia — PDF Stamper (Adobe-safe build)")
 
-# ---- Helpers ----
+# ---------------- Helpers ----------------
+
+def _coerce_int(value: Any) -> int:
+    """Best-effort int coercion. Returns 0 if missing/invalid."""
+    if value is None:
+        return 0
+    # Guard: if someone pasted a date into "ilość", treat as invalid -> 0
+    if isinstance(value, (datetime, date)):
+        return 0
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int,)):
+        return int(value)
+    if isinstance(value, float):
+        if value != value:  # NaN
+            return 0
+        return int(round(value))
+    # strings -> pick first integer found
+    s = str(value).strip()
+    if not s:
+        return 0
+    m = re.search(r'-?\d+', s.replace(',', '.'))
+    return int(m.group(0)) if m else 0
+
+def _to_str(v: Any) -> str:
+    if v is None:
+        return ""
+    if isinstance(v, (datetime, date)):
+        return v.strftime("%Y-%m-%d")
+    return str(v)
 
 def _parse_excel(excel_bytes: bytes) -> List[Tuple[str, int, str]]:
-    """Return rows of (zlecenie, ilosc_palet, przewoznik)."""
+    """Return rows of (zlecenie, ilosc_palet, przewoznik). Robust to dates in cells."""
     wb = load_workbook(io.BytesIO(excel_bytes), data_only=True)
     ws = wb.active
-    rows = []
-    # Try to find header by names; fallback to fixed columns A/B/C.
+    rows: List[Tuple[str, int, str]] = []
     header = {str((ws.cell(1, c).value or "")).strip().lower(): c for c in range(1, ws.max_column+1)}
     col_z = header.get("zlecenie", 1)
     col_i = header.get("ilość palet", header.get("ilosc palet", 2))
     col_p = header.get("przewoźnik", header.get("przewoznik", 3))
+
     for r in range(2, ws.max_row+1):
         z = ws.cell(r, col_z).value
         i = ws.cell(r, col_i).value
         p = ws.cell(r, col_p).value
         if z is None and i is None and p is None:
             continue
-        try:
-            i = int(i)
-        except Exception:
-            i = 0 if i is None else int(float(i))
-        rows.append((str(z or "").strip(), i, str(p or "").strip()))
+        rows.append((_to_str(z).strip(), _coerce_int(i), _to_str(p).strip()))
     return rows
 
 def _register_fonts():
-    # Embed a Unicode font for Polish characters — avoids Adobe substitution issues.
-    # DejaVuSans.ttf is widely available; try to load from system, else bundled copy.
     try_paths = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/local/share/fonts/DejaVuSans.ttf",
@@ -53,13 +74,12 @@ def _register_fonts():
         if os.path.exists(p):
             pdfmetrics.registerFont(TTFont("DejaVuSans", p))
             return "DejaVuSans"
-    # Fallback to Helvetica (may miss diacritics, but we tried).
     return "Helvetica"
 
-def _make_stamp_page(zlecenie: str, ilosc: int, przewoznik: str, page_size=A4) -> bytes:
-    """Create a single-page PDF overlay with the annotation text."""
+def _make_stamp_page(zlecenie: str, ilosc: int, przewoznik: str, width: float, height: float) -> bytes:
+    from reportlab.pdfgen import canvas
     buf = io.BytesIO()
-    c = canvas.Canvas(buf, pagesize=page_size, bottomup=True)
+    c = canvas.Canvas(buf, pagesize=(width, height), bottomup=True)
     font_name = _register_fonts()
     c.setAuthor("Kersia PDF Stamper")
     c.setTitle(f"Zlecenie {zlecenie}")
@@ -68,8 +88,7 @@ def _make_stamp_page(zlecenie: str, ilosc: int, przewoznik: str, page_size=A4) -
     c.setFont(font_name, 14)
     margin = 15 * mm
     x = margin
-    y = page_size[1] - margin
-
+    y = height - margin
     c.drawString(x, y, f"ZLECENIE: {zlecenie}")
     y -= 8 * mm
     c.drawString(x, y, f"ILOŚĆ PALET: {ilosc}")
@@ -80,22 +99,19 @@ def _make_stamp_page(zlecenie: str, ilosc: int, przewoznik: str, page_size=A4) -
     return buf.getvalue()
 
 def _normalize_contents(page: PageObject):
-    """Ensure /Contents is an array; this helps old Adobe readers."""
     from PyPDF2.generic import ArrayObject
     contents = page.get("/Contents")
     if contents is None:
         return
     if not isinstance(contents, ArrayObject):
-        page[page.indirect_ref["/Contents"] if hasattr(page, "indirect_ref") else "/Contents"] = ArrayObject([contents])
+        page["/Contents"] = ArrayObject([contents])
 
 def annotate_pdf(pdf_bytes: bytes, excel_bytes: bytes, max_per_sheet: int = 3) -> bytes:
-    # Read source PDF and data
-    reader = PdfReader(io.BytesIO(pdf_bytes), strict=False)  # be lenient on incoming files
+    reader = PdfReader(io.BytesIO(pdf_bytes), strict=False)
     rows = _parse_excel(excel_bytes)
     if not rows:
         raise ValueError("Nie znaleziono danych w Excelu. Upewnij się, że masz kolumny: ZLECENIE, ILOŚĆ PALET, PRZEWOŹNIK.")
 
-    # Prepare writer
     writer = PdfWriter()
     writer.add_metadata({
         "/Producer": "Kersia PDF Stamper (PyPDF2 + ReportLab)",
@@ -103,50 +119,41 @@ def annotate_pdf(pdf_bytes: bytes, excel_bytes: bytes, max_per_sheet: int = 3) -
         "/Title": "Zlecenia",
     })
 
-    # Iterate pages and stamp in order
     data_idx = 0
-    for page_num, page in enumerate(reader.pages):
-        # Normalize contents for Acrobat strictness
+    for page in reader.pages:
         _normalize_contents(page)
-
+        w = float(page.mediabox.width)
+        h = float(page.mediabox.height)
         for _ in range(max_per_sheet):
             if data_idx >= len(rows):
                 break
             zlecenie, ilosc, przewoznik = rows[data_idx]
             data_idx += 1
-
-            # Make a one-page overlay PDF and merge onto the current page
-            overlay_bytes = _make_stamp_page(zlecenie, ilosc, przewoznik, page.mediabox[2:])
+            overlay_bytes = _make_stamp_page(zlecenie, ilosc, przewoznik, w, h)
             overlay_reader = PdfReader(io.BytesIO(overlay_bytes), strict=False)
-            overlay_page = overlay_reader.pages[0]
-
-            # Merge using merge_page (safe for Acrobat when contents normalized)
-            page.merge_page(overlay_page)
-
-        # After stamping, add to writer as a fresh page object
+            page.merge_page(overlay_reader.pages[0])
         writer.add_page(page)
 
-    # If we still have more rows than pages, continue stamping on copies of the last page size
     while data_idx < len(rows):
-        base_size = reader.pages[-1].mediabox[2:]
-        # Create a blank page to carry more stamps
-        blank = PageObject.create_blank_page(width=float(base_size[0]), height=float(base_size[1]))
+        # create blank page of last size
+        w = float(reader.pages[-1].mediabox.width)
+        h = float(reader.pages[-1].mediabox.height)
+        blank = PageObject.create_blank_page(width=w, height=h)
         for _ in range(max_per_sheet):
             if data_idx >= len(rows):
                 break
             zlecenie, ilosc, przewoznik = rows[data_idx]
             data_idx += 1
-            overlay_bytes = _make_stamp_page(zlecenie, ilosc, przewoznik, base_size)
+            overlay_bytes = _make_stamp_page(zlecenie, ilosc, przewoznik, w, h)
             overlay_reader = PdfReader(io.BytesIO(overlay_bytes), strict=False)
-            overlay_page = overlay_reader.pages[0]
-            blank.merge_page(overlay_page)
+            blank.merge_page(overlay_reader.pages[0])
         writer.add_page(blank)
 
     out = io.BytesIO()
-    writer.write(out)  # write fresh file (no incremental update) for Acrobat compatibility
+    writer.write(out)
     return out.getvalue()
 
-# ---- UI ----
+# ---------------- UI ----------------
 excel_file = st.file_uploader("Plik Excel (ZLECENIE, ilość palet, przewoźnik):", type=["xlsx", "xlsm", "xls"])
 pdf_file   = st.file_uploader("Plik PDF (szablon/strony do ostemplowania):", type=["pdf"])
 max_per_sheet = st.slider("Maks. wpisów na stronę", min_value=1, max_value=6, value=3, step=1)
