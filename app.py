@@ -2,7 +2,7 @@ import io, re
 from datetime import datetime
 import streamlit as st
 from openpyxl import load_workbook
-from pdfminer.high_level import extract_text
+from pdfminer_high_level_patch import extract_text  # small shim defined below
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
@@ -26,19 +26,13 @@ EXTRA_CROP_LR = 14
 EXTRA_CROP_T  = 18
 EXTRA_CROP_B  = 28
 
-NBSP = "\u00A0"; NNBSP = "\u202F"; THINSP = "\u2009"
-
 def strip_diacritics(s: str) -> str:
     import unicodedata
     if s is None:
         return ""
     return "".join(c for c in unicodedata.normalize("NFKD", str(s)) if ord(c) < 128)
 
-def normalize_digits(s: str) -> str:
-    return re.sub(r"[\s\-{}{}{}]".format(NBSP, NNBSP, THINSP), "", s)
-
 def read_excel_lookup(file_like):
-    """Zbiera wszystkie numerki z kolumny ZLECENIE (rozbija '56997+56998')."""
     wb = load_workbook(file_like, data_only=True); ws = wb.active
     headers = {}
     for col in range(1, ws.max_column + 1):
@@ -58,14 +52,18 @@ def read_excel_lookup(file_like):
         z = "" if z is None else str(z).strip()
         il = "" if il is None else str(il).strip()
         pr = "" if pr is None else str(pr).strip()
-        parts = [p.strip() for p in re.split(r"[+;,/\s]+", z) if p and p.strip()]
+        parts = [p.strip() for p in re.split(r"[+;,/\s]+", z) if p.strip()]
         for p in parts:
-            p2 = "".join(ch for ch in p if ch.isdigit())
+            p2 = "".join(ch for ch in p if p and str(p).isdigit() for p in [p]] if False else "".join(ch for ch in p if ch.isdigit())
             if p2.isdigit():
                 all_nums.add(p2); lookup[p2] = (z, il, pr)
     return lookup, all_nums
 
-# --- PDF parsing: wyciągamy WYŁĄCZNIE numery po etykiecie "Sales Order" (plus skróty)
+NBSP = "\u00A0"; NNBSP = "\u202F"; THINSP = "\u2009"
+def normalize_digits(s: str) -> str:
+    return re.sub(r"[\s\-{}{}{}]".format(NBSP, NNBSP, THINSP), "", s)
+
+# NEW: strict Sales Order extraction
 SO_PATTERNS = [
     r"Sales\s*Order\s*[:#]?\s*([0-9\s\u00A0\u202F\u2009\-]{4,14})",
     r"\bSO\s*[:#]?\s*([0-9\s\u00A0\u202F\u2009\-]{4,14})",
@@ -73,12 +71,22 @@ SO_PATTERNS = [
 ]
 
 def extract_sales_orders(text: str):
-    out, seen = [], set()
+    found = []
     for pat in SO_PATTERNS:
         for m in re.finditer(pat, text, flags=re.I):
             n = normalize_digits(m.group(1))
-            if n.isdigit() and 4 <= len(n) <= 10 and n not in seen:
-                out.append(n); seen.add(n)
+            if n.isdigit() and 4 <= len(n) <= 10 and n not in found:
+                found.append(n)
+    return found
+
+def extract_candidates_relaxed(text: str):
+    normal = re.findall(r"\b\d{4,8}\b", text)
+    fancy = re.findall(r"(?<!\d)(?:\d[\s\u00A0\u202F\u2009\-]?){4,9}(?!\d)", text)
+    fancy = [normalize_digits(s) for s in fancy]
+    out, seen = [], set()
+    for c in normal + fancy:
+        if c.isdigit() and 4 <= len(c) <= 8 and c not in seen:
+            out.append(c); seen.add(c)
     return out
 
 def adaptive_crop_extra(text: str):
@@ -96,23 +104,40 @@ def make_overlay(width, height, header, footer, font_size=12, margin_mm=8):
     if footer: c.drawRightString(width - m, m, footer)
     c.save(); return buf.getvalue()
 
-def make_summary_page_sentences(width, height, missing_from_pdf):
+def make_summary_page(width, height, missing_from_pdf, missing_from_excel):
     buf = io.BytesIO(); c = canvas.Canvas(buf, pagesize=(width, height))
     W, H = width, height
     try: c.setFont("Helvetica-Bold", 16)
     except Exception: c.setFont("Helvetica", 16)
-    c.drawString(30, H-40, "RAPORT: ZLECENIA Z EXCELA NIEZNALEZIONE W PDF (Sales Order)")
+    c.drawString(30, H-40, "RAPORT POROWNANIA DANYCH")
 
     y = H-80
-    c.setFont("Helvetica", 11)
+    c.setFont("Helvetica-Bold", 12); c.drawString(30, y, "ZLECENIA Z EXCELA NIEZNALEZIONE W PDF:")
+    y -= 20; c.setFont("Helvetica-Bold", 10); c.drawString(30, y, "ZLECENIE"); 
+    y -= 12; c.setLineWidth(0.5); c.line(30, y, W-30, y); y -= 10
+    c.setFont("Helvetica", 10)
     if not missing_from_pdf:
-        c.drawString(30, y, "Wszystkie zlecenia z Excela odnaleziono w PDF."); y -= 18
+        c.drawString(30, y, "(brak)"); y -= 16
     else:
-        for num in sorted(missing_from_pdf, key=lambda x: int(x)):
-            line = f"Zlecenie {num} nie zostalo odnalezione w PDF."
-            c.drawString(30, y, line); y -= 16
+        for num in missing_from_pdf:
+            c.drawString(30, y, str(num)); y -= 14
+            if y < 80:
+                c.showPage(); y = H-60; c.setFont("Helvetica", 10)
+
+    if y < 140:
+        c.showPage(); y = H-60
+
+    c.setFont("Helvetica-Bold", 12); c.drawString(30, y, "ZLECENIA Z PDF-A NIEZNALEZIONE W EXCELU:")
+    y -= 20; c.setFont("Helvetica-Bold", 10); c.drawString(30, y, "ZLECENIE")
+    y -= 12; c.setLineWidth(0.5); c.line(30, y, W-30, y); y -= 10
+    c.setFont("Helvetica", 10)
+    if not missing_from_excel:
+        c.drawString(30, y, "(brak)"); y -= 16
+    else:
+        for num in missing_from_excel:
+            c.drawString(30, y, str(num)); y -= 14
             if y < 60:
-                c.showPage(); y = H-60; c.setFont("Helvetica", 11)
+                c.showPage(); y = H-60; c.setFont("Helvetica", 10)
 
     c.save(); return buf.getvalue()
 
@@ -120,16 +145,25 @@ def annotate_pdf_web(pdf_bytes, xlsx_bytes, max_per_sheet):
     lookup, excel_numbers = read_excel_lookup(io.BytesIO(xlsx_bytes))
     reader = PdfReader(io.BytesIO(pdf_bytes))
     groups, page_meta, page_text_cache = {}, {}, {}
-    pdf_sales_orders = set()
+    found_in_pdf = set(); pdf_candidates_all = set()
 
     for i, _ in enumerate(reader.pages):
         page_text = extract_text(io.BytesIO(pdf_bytes), page_numbers=[i]) or ""
         page_text_cache[i] = page_text
-        so_list = extract_sales_orders(page_text)
-        pdf_sales_orders.update(so_list)
 
-        # Używamy dopasowania tylko jeśli SO na tej stronie jest w Excelu (utrzymujemy grupowanie)
-        picked = next((n for n in so_list if n in excel_numbers), None)
+        # STRICT Sales Order first
+        so_list = extract_sales_orders(page_text)
+        if so_list:
+            cands = so_list
+        else:
+            # fallback (rare): relaxed detection
+            cands = extract_candidates_relaxed(page_text)
+
+        for c in cands:
+            if c in excel_numbers: found_in_pdf.add(c)
+            else: pdf_candidates_all.add(c)
+
+        picked = next((n for n in cands if n in excel_numbers), None)
         mapped = lookup.get(picked) if picked else None
         if mapped:
             z_full, il, pr = mapped
@@ -143,7 +177,6 @@ def annotate_pdf_web(pdf_bytes, xlsx_bytes, max_per_sheet):
             key = "_NO_ORDER_{}".format(i+1); header = "(nie znaleziono numeru zlecenia na tej stronie)"; footer = ""
         groups.setdefault(key, []).append(i); page_meta[i] = (header, footer)
 
-    # Kolejność grup
     def key_sort(k: str):
         import re; nums = [int(x) for x in re.findall(r"\d+", k)]; return (min(nums) if nums else 10**9, k)
     ordered_keys = sorted(groups.keys(), key=key_sort)
@@ -155,7 +188,7 @@ def annotate_pdf_web(pdf_bytes, xlsx_bytes, max_per_sheet):
     base_crop_l = BASE_CROP_L*mm; base_crop_r = BASE_CROP_R*mm
     base_crop_t = BASE_CROP_T*mm; base_crop_b = BASE_CROP_B*mm
 
-    writer = PdfWriter(); writer.add_metadata({"/Producer": "Kersia PDF Stamper v1.7 (pypdf)"})
+    writer = PdfWriter(); writer.add_metadata({"/Producer": "Kersia PDF Stamper v1.6b (pypdf)"})
     for gkey in ordered_keys:
         idxs = groups[gkey]
         for start in range(0, len(idxs), max_per_sheet):
@@ -187,21 +220,39 @@ def annotate_pdf_web(pdf_bytes, xlsx_bytes, max_per_sheet):
             ov = PdfReader(io.BytesIO(make_overlay(W, H, *page_meta[batch[0]])))
             base_page.merge_page(ov.pages[0])
 
-    # --- Summary page (ONLY Excel missing in PDF) ---
-    excel_missing = sorted(list(excel_numbers - pdf_sales_orders), key=lambda x: int(x)) if excel_numbers else []
-    rep = PdfReader(io.BytesIO(make_summary_page_sentences(W, H, excel_missing)))
+    excel_missing = sorted(list(excel_numbers - found_in_pdf), key=lambda x: int(x)) if excel_numbers else []
+    pdf_only = sorted(list(pdf_candidates_all - excel_numbers), key=lambda x: int(x)) if pdf_candidates_all else []
+    rep = PdfReader(io.BytesIO(make_summary_page(W, H, excel_missing, pdf_only)))
     writer.add_page(rep.pages[0])
 
-    # sanitize pass
     buf = io.BytesIO(); writer.write(buf); buf.seek(0)
     r2 = PdfReader(buf, strict=False); w2 = PdfWriter()
     for p in r2.pages: w2.add_page(p)
     out = io.BytesIO(); w2.write(out)
     return out.getvalue()
 
+# ---- Shim for pdfminer to avoid import name differences on Streamlit Cloud ----
+# Some environments need namespaced import. Provide a tiny wrapper with the same API.
+# We ship it inline here using exec trick when module isn't available.
+try:
+    from pdfminer.high_level import extract_text as _extract_text_real
+except Exception:
+    _extract_text_real = None
+
+class pdfminer_high_level_patch:
+    @staticmethod
+    def extract_text(*args, **kwargs):
+        if _extract_text_real is None:
+            from pdfminer.high_level import extract_text as real
+            return real(*args, **kwargs)
+        return _extract_text_real(*args, **kwargs)
+
+# re-export for above import
+extract_text = pdfminer_high_level_patch.extract_text
+
 # ---- UI ----
-st.set_page_config(page_title="Kersia PDF Stamper v1.7 (Excel→PDF brakujące)", page_icon="🧰", layout="centered")
-st.title("Kersia — PDF Stamper (na końcu: brakujące z Excela w PDF)")
+st.set_page_config(page_title="Kersia PDF Stamper v1.6b (SO fix)", page_icon="🧰", layout="centered")
+st.title("Kersia — PDF Stamper (Sales Order fix + raport)")
 excel_file = st.file_uploader("Plik Excel:", type=["xlsx", "xlsm", "xls"])
 pdf_file = st.file_uploader("Plik PDF:", type=["pdf"])
 max_per_sheet = st.slider("Maks. stron na kartkę", 1, 6, 3, 1)
