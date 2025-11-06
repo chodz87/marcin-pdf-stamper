@@ -65,7 +65,7 @@ def read_excel_lookup(file_like):
                 all_nums.add(p2); lookup[p2] = (z, il, pr)
     return lookup, all_nums
 
-# --- PDF parsing ---
+# --- PDF parsing: wyciągamy WYŁĄCZNIE numery po etykiecie "Sales Order" (plus skróty)
 SO_PATTERNS = [
     r"Sales\s*Order\s*[:#]?\s*([0-9\s\u00A0\u202F\u2009\-]{4,14})",
     r"\bSO\s*[:#]?\s*([0-9\s\u00A0\u202F\u2009\-]{4,14})",
@@ -96,40 +96,23 @@ def make_overlay(width, height, header, footer, font_size=12, margin_mm=8):
     if footer: c.drawRightString(width - m, m, footer)
     c.save(); return buf.getvalue()
 
-def make_summary_page(width, height, missing_from_pdf, missing_from_excel):
+def make_summary_page_sentences(width, height, missing_from_pdf):
     buf = io.BytesIO(); c = canvas.Canvas(buf, pagesize=(width, height))
     W, H = width, height
     try: c.setFont("Helvetica-Bold", 16)
     except Exception: c.setFont("Helvetica", 16)
-    c.drawString(30, H-40, "RAPORT POROWNANIA DANYCH (Sales Order vs Excel)")
+    c.drawString(30, H-40, "RAPORT: ZLECENIA Z EXCELA NIEZNALEZIONE W PDF (Sales Order)")
 
     y = H-80
-    c.setFont("Helvetica-Bold", 12); c.drawString(30, y, "ZLECENIA z EXCELA NIEZNALEZIONE w PDF (Sales Order):")
-    y -= 20; c.setFont("Helvetica-Bold", 10); c.drawString(30, y, "NUMER")
-    y -= 12; c.setLineWidth(0.5); c.line(30, y, W-30, y); y -= 10
-    c.setFont("Helvetica", 10)
+    c.setFont("Helvetica", 11)
     if not missing_from_pdf:
-        c.drawString(30, y, "(brak)"); y -= 16
+        c.drawString(30, y, "Wszystkie zlecenia z Excela odnaleziono w PDF."); y -= 18
     else:
         for num in sorted(missing_from_pdf, key=lambda x: int(x)):
-            c.drawString(30, y, str(num)); y -= 14
-            if y < 80:
-                c.showPage(); y = H-60; c.setFont("Helvetica", 10)
-
-    if y < 140:
-        c.showPage(); y = H-60
-
-    c.setFont("Helvetica-Bold", 12); c.drawString(30, y, "ZLECENIA z PDF (Sales Order) NIEZNALEZIONE w EXCELU:")
-    y -= 20; c.setFont("Helvetica-Bold", 10); c.drawString(30, y, "NUMER")
-    y -= 12; c.setLineWidth(0.5); c.line(30, y, W-30, y); y -= 10
-    c.setFont("Helvetica", 10)
-    if not missing_from_excel:
-        c.drawString(30, y, "(brak)"); y -= 16
-    else:
-        for num in sorted(missing_from_excel, key=lambda x: int(x)):
-            c.drawString(30, y, str(num)); y -= 14
+            line = f"Zlecenie {num} nie zostalo odnalezione w PDF."
+            c.drawString(30, y, line); y -= 16
             if y < 60:
-                c.showPage(); y = H-60; c.setFont("Helvetica", 10)
+                c.showPage(); y = H-60; c.setFont("Helvetica", 11)
 
     c.save(); return buf.getvalue()
 
@@ -145,6 +128,7 @@ def annotate_pdf_web(pdf_bytes, xlsx_bytes, max_per_sheet):
         so_list = extract_sales_orders(page_text)
         pdf_sales_orders.update(so_list)
 
+        # Używamy dopasowania tylko jeśli SO na tej stronie jest w Excelu (utrzymujemy grupowanie)
         picked = next((n for n in so_list if n in excel_numbers), None)
         mapped = lookup.get(picked) if picked else None
         if mapped:
@@ -159,6 +143,7 @@ def annotate_pdf_web(pdf_bytes, xlsx_bytes, max_per_sheet):
             key = "_NO_ORDER_{}".format(i+1); header = "(nie znaleziono numeru zlecenia na tej stronie)"; footer = ""
         groups.setdefault(key, []).append(i); page_meta[i] = (header, footer)
 
+    # Kolejność grup
     def key_sort(k: str):
         import re; nums = [int(x) for x in re.findall(r"\d+", k)]; return (min(nums) if nums else 10**9, k)
     ordered_keys = sorted(groups.keys(), key=key_sort)
@@ -170,7 +155,7 @@ def annotate_pdf_web(pdf_bytes, xlsx_bytes, max_per_sheet):
     base_crop_l = BASE_CROP_L*mm; base_crop_r = BASE_CROP_R*mm
     base_crop_t = BASE_CROP_T*mm; base_crop_b = BASE_CROP_B*mm
 
-    writer = PdfWriter(); writer.add_metadata({"/Producer": "Kersia PDF Stamper v1.6c (pypdf)"})
+    writer = PdfWriter(); writer.add_metadata({"/Producer": "Kersia PDF Stamper v1.7 (pypdf)"})
     for gkey in ordered_keys:
         idxs = groups[gkey]
         for start in range(0, len(idxs), max_per_sheet):
@@ -202,10 +187,9 @@ def annotate_pdf_web(pdf_bytes, xlsx_bytes, max_per_sheet):
             ov = PdfReader(io.BytesIO(make_overlay(W, H, *page_meta[batch[0]])))
             base_page.merge_page(ov.pages[0])
 
-    # --- Summary page (strict sets) ---
+    # --- Summary page (ONLY Excel missing in PDF) ---
     excel_missing = sorted(list(excel_numbers - pdf_sales_orders), key=lambda x: int(x)) if excel_numbers else []
-    pdf_only = sorted(list(pdf_sales_orders - excel_numbers), key=lambda x: int(x)) if pdf_sales_orders else []
-    rep = PdfReader(io.BytesIO(make_summary_page(W, H, excel_missing, pdf_only)))
+    rep = PdfReader(io.BytesIO(make_summary_page_sentences(W, H, excel_missing)))
     writer.add_page(rep.pages[0])
 
     # sanitize pass
@@ -216,8 +200,8 @@ def annotate_pdf_web(pdf_bytes, xlsx_bytes, max_per_sheet):
     return out.getvalue()
 
 # ---- UI ----
-st.set_page_config(page_title="Kersia PDF Stamper v1.6c (SO↔Excel raport)", page_icon="🧰", layout="centered")
-st.title("Kersia — PDF Stamper (Sales Order ↔ Excel, raport na końcu)")
+st.set_page_config(page_title="Kersia PDF Stamper v1.7 (Excel→PDF brakujące)", page_icon="🧰", layout="centered")
+st.title("Kersia — PDF Stamper (na końcu: brakujące z Excela w PDF)")
 excel_file = st.file_uploader("Plik Excel:", type=["xlsx", "xlsm", "xls"])
 pdf_file = st.file_uploader("Plik PDF:", type=["pdf"])
 max_per_sheet = st.slider("Maks. stron na kartkę", 1, 6, 3, 1)
