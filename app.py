@@ -6,16 +6,14 @@ import streamlit as st
 from openpyxl import load_workbook
 from PyPDF2 import PdfReader, PdfWriter
 from PyPDF2._page import PageObject
-from PyPDF2.generic import ArrayObject, NameObject
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
 st.set_page_config(page_title="Kersia PDF Stamper", page_icon="🧰", layout="centered")
-st.title("Kersia — PDF Stamper (Adobe-safe build v3)")
+st.title("Kersia — PDF Stamper (Adobe-safe v4)")
 
-# ---------------- Helpers ----------------
 
 def _coerce_int(value: Any) -> int:
     if value is None:
@@ -27,7 +25,7 @@ def _coerce_int(value: Any) -> int:
     if isinstance(value, int):
         return value
     if isinstance(value, float):
-        if value != value:  # NaN
+        if value != value:
             return 0
         return int(round(value))
     s = str(value).strip()
@@ -89,17 +87,11 @@ def _make_stamp_page(zlecenie: str, ilosc: int, przewoznik: str, width: float, h
     y -= 8 * mm
     c.drawString(x, y, f"ILOŚĆ PALET: {ilosc}")
     y -= 8 * mm
-    c.drawString(x, y, f"PRZEWOŹNIK: {przewoznik}")
+    c.drawString(x, y, f"PRZEWOŹNIK: {przewoźnik}")
     c.showPage()
     c.save()
     return buf.getvalue()
 
-def _normalize_contents(page: PageObject):
-    contents = page.get(NameObject("/Contents"))
-    if contents is None:
-        return
-    if not isinstance(contents, ArrayObject):
-        page[NameObject("/Contents")] = ArrayObject([contents])
 
 def annotate_pdf(pdf_bytes: bytes, excel_bytes: bytes, max_per_sheet: int = 3) -> bytes:
     reader = PdfReader(io.BytesIO(pdf_bytes), strict=False)
@@ -116,7 +108,6 @@ def annotate_pdf(pdf_bytes: bytes, excel_bytes: bytes, max_per_sheet: int = 3) -
 
     data_idx = 0
     for page in reader.pages:
-        _normalize_contents(page)
         w = float(page.mediabox.width)
         h = float(page.mediabox.height)
         for _ in range(max_per_sheet):
@@ -147,7 +138,6 @@ def annotate_pdf(pdf_bytes: bytes, excel_bytes: bytes, max_per_sheet: int = 3) -
     writer.write(out)
     return out.getvalue()
 
-# ---------------- UI ----------------
 excel_file = st.file_uploader("Plik Excel (ZLECENIE, ilość palet, przewoźnik):", type=["xlsx", "xlsm", "xls"])
 pdf_file   = st.file_uploader("Plik PDF (szablon/strony do ostemplowania):", type=["pdf"])
 max_per_sheet = st.slider("Maks. wpisów na stronę", min_value=1, max_value=6, value=3, step=1)
