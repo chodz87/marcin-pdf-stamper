@@ -1,20 +1,17 @@
 
-import io, re
-from datetime import datetime
-from typing import List
-
 import streamlit as st
+from datetime import datetime
 from openpyxl import load_workbook
+from pdfminer.high_level import extract_text
 from PyPDF2 import PdfReader, PdfWriter, Transformation
 from PyPDF2._page import PageObject
-from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
-from pdfminer.high_level import extract_text
 
 st.set_page_config(page_title="Kersia PDF Stamper", page_icon="🧰", layout="centered")
-st.title("Kersia — PDF Stamper (web)")
-st.caption("Wrzuc Excel + PDF, ustaw limit stron na kartkę i pobierz gotowy PDF.")
+st.title("Kersia — PDF Stamper (web v1.1)")
+st.caption("Poprawiona zgodność z Adobe Reader.")
+
 
 SIDE_MARGIN_MM = 2
 TOP_MARGIN_MM = 4
@@ -38,8 +35,9 @@ def strip_diacritics(s: str) -> str:
         return ""
     return "".join(c for c in unicodedata.normalize("NFKD", str(s)) if ord(c) < 128)
 
-def read_excel_lookup(file_like):
-    wb = load_workbook(file_like, data_only=True)
+def read_excel_lookup(file_like_or_path):
+    from openpyxl import load_workbook
+    wb = load_workbook(file_like_or_path, data_only=True)
     ws = wb.active
     headers = {}
     for col in range(1, ws.max_column + 1):
@@ -54,6 +52,7 @@ def read_excel_lookup(file_like):
         raise ValueError("Excel musi mieć kolumny: ZLECENIE, ilość palet, przewoźnik (nagłówki w 1. wierszu).")
     lookup = {}
     all_nums = set()
+    import re
     for row in range(2, ws.max_row + 1):
         z = ws.cell(row=row, column=z_col).value
         il = ws.cell(row=row, column=ilo_col).value
@@ -74,7 +73,7 @@ def normalize_digits(s: str) -> str:
     import re
     return re.sub(r"[\s\-{}{}{}]".format(NBSP, NNBSP, THINSP), "", s)
 
-def extract_candidates(text: str) -> List[str]:
+def extract_candidates(text: str):
     import re
     normal = re.findall(r"\b\d{4,8}\b", text)
     fancy = re.findall(r"(?<!\d)(?:\d[\s\u00A0\u202F\u2009\-]?){4,9}(?!\d)", text)
@@ -88,15 +87,7 @@ def extract_candidates(text: str) -> List[str]:
             out.append(c); seen.add(c)
     return out
 
-def make_blank_page_bytes(width: float, height: float) -> bytes:
-    import io
-    from reportlab.pdfgen import canvas
-    buf = io.BytesIO()
-    c = canvas.Canvas(buf, pagesize=(width, height))
-    c.showPage(); c.save()
-    return buf.getvalue()
-
-def make_stamp_overlay_bytes(width: float, height: float, header: str, footer: str, font_size: int = 12, margin_mm: int = 8) -> bytes:
+def make_stamp_overlay_bytes(width, height, header, footer, font_size=12, margin_mm=8):
     import io
     from reportlab.pdfgen import canvas
     from reportlab.lib.units import mm
@@ -113,20 +104,16 @@ def make_stamp_overlay_bytes(width: float, height: float, header: str, footer: s
     c.save()
     return buf.getvalue()
 
-def chunk(lst, n):
-    for i in range(0, len(lst), n):
-        yield lst[i:i+n]
-
 def adaptive_crop_extra(text: str):
     from reportlab.lib.units import mm
     lines = [ln for ln in (text or "").splitlines() if ln.strip()]
-    sparse = (len(lines) <= 4) or (len((text or "")) < 80)
+    sparse = (len(lines) <= LOW_TEXT_LINES) or (len((text or "")) < SHORT_TEXT_CHARS)
     if sparse:
-        return (14*mm, 14*mm, 18*mm, 28*mm)
+        return (EXTRA_CROP_LR*mm, EXTRA_CROP_LR*mm, EXTRA_CROP_T*mm, EXTRA_CROP_B*mm)
     return (0,0,0,0)
 
-def annotate_pdf(pdf_bytes: bytes, xlsx_bytes: bytes, max_per_sheet: int) -> bytes:
-    import io
+def annotate_pdf_web(pdf_bytes, xlsx_bytes, max_per_sheet):
+    import io, re
     from PyPDF2 import PdfReader, PdfWriter, Transformation
     from PyPDF2._page import PageObject
     from reportlab.lib.pagesizes import A4
@@ -136,10 +123,7 @@ def annotate_pdf(pdf_bytes: bytes, xlsx_bytes: bytes, max_per_sheet: int) -> byt
     lookup, excel_numbers = read_excel_lookup(io.BytesIO(xlsx_bytes))
     reader = PdfReader(io.BytesIO(pdf_bytes))
 
-    groups = {}
-    page_meta = {}
-    page_text_cache = {}
-
+    groups, page_meta, page_text_cache = {}, {}, {}
     for i, _ in enumerate(reader.pages):
         page_text = extract_text(io.BytesIO(pdf_bytes), page_numbers=[i]) or ""
         page_text_cache[i] = page_text
@@ -165,27 +149,26 @@ def annotate_pdf(pdf_bytes: bytes, xlsx_bytes: bytes, max_per_sheet: int) -> byt
         groups.setdefault(key, []).append(i)
         page_meta[i] = (header, footer)
 
-    def key_sort(k: str):
+    def key_sort(k):
         import re
         nums = [int(x) for x in re.findall(r"\d+", k)]
         return (min(nums) if nums else 10**9, k)
     ordered_keys = sorted(groups.keys(), key=key_sort)
 
-    writer = PdfWriter()
     W, H = A4
-
     margin_x = SIDE_MARGIN_MM * mm
     top_margin = TOP_MARGIN_MM * mm
     bottom_for_stamp = STAMP_BOTTOM_MM * mm
     gap = INTER_GAP_MM * mm
-
     avail_w = W - 2 * margin_x
     avail_h = H - top_margin - bottom_for_stamp
-
     base_crop_l = BASE_CROP_L * mm
     base_crop_r = BASE_CROP_R * mm
     base_crop_t = BASE_CROP_T * mm
     base_crop_b = BASE_CROP_B * mm
+
+    writer = PdfWriter()
+    writer.add_metadata({"/Producer": "Kersia PDF Stamper Web v1.1"})
 
     for gkey in ordered_keys:
         idxs = groups[gkey]
@@ -210,8 +193,7 @@ def annotate_pdf(pdf_bytes: bytes, xlsx_bytes: bytes, max_per_sheet: int) -> byt
             total_h += gap * max(0, len(batch)-1)
             down = min(1.0, avail_h / total_h) if total_h > 0 else 1.0
 
-            base_pdf = PdfReader(io.BytesIO(make_blank_page_bytes(W, H)))
-            base_page = base_pdf.pages[0]
+            base_page = PageObject.create_blank_page(width=W, height=H)
 
             y = H - top_margin
             for (idx, cl, cr, ct, cb, s, dh) in items:
@@ -226,11 +208,13 @@ def annotate_pdf(pdf_bytes: bytes, xlsx_bytes: bytes, max_per_sheet: int) -> byt
                 y = y2 - gap
 
             header, footer = page_meta[batch[0]]
-            overlay = PdfReader(io.BytesIO(make_stamp_overlay_bytes(W, H, header, footer)))
-            base_page.merge_page(overlay.pages[0])
+            from PyPDF2 import PdfReader as _Reader
+            import io as _io
+            ov = _Reader(_io.BytesIO(make_stamp_overlay_bytes(W, H, header, footer)))
+            base_page.merge_page(ov.pages[0])
             writer.add_page(base_page)
 
-    out_buf = io.BytesIO()
+    out_buf = __import__("io").BytesIO()
     writer.write(out_buf)
     return out_buf.getvalue()
 
@@ -240,7 +224,7 @@ max_per_sheet = st.slider("Maks. stron na kartkę", 1, 6, 3, 1)
 
 if st.button("GENERUJ PDF", type="primary", disabled=not (excel_file and pdf_file)):
     try:
-        result = annotate_pdf(pdf_file.read(), excel_file.read(), max_per_sheet)
+        result = annotate_pdf_web(pdf_file.read(), excel_file.read(), max_per_sheet)
         fname = "zlecenia_{}.pdf".format(datetime.now().strftime('%Y%m%d'))
         st.success("Gotowe! Pobierz poniżej.")
         st.download_button("Pobierz wynik", data=result, file_name=fname, mime="application/pdf")
