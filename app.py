@@ -12,7 +12,7 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
 st.set_page_config(page_title="Kersia PDF Stamper", page_icon="🧰", layout="centered")
-st.title("Kersia — PDF Stamper (Adobe-safe v4)")
+st.title("Kersia — PDF Stamper (Adobe-safe v5)")
 
 
 def _coerce_int(value: Any) -> int:
@@ -45,10 +45,13 @@ def _parse_excel(excel_bytes: bytes) -> List[Tuple[str, int, str]]:
     wb = load_workbook(io.BytesIO(excel_bytes), data_only=True)
     ws = wb.active
     rows: List[Tuple[str, int, str]] = []
+    # Header detection: handle many variants
     header = {str((ws.cell(1, c).value or "")).strip().lower(): c for c in range(1, ws.max_column+1)}
-    col_z = header.get("zlecenie", 1)
-    col_i = header.get("ilość palet", header.get("ilosc palet", 2))
-    col_p = header.get("przewoźnik", header.get("przewoznik", 3))
+    col_z = header.get("zlecenie", header.get("nr zlecenia", 1))
+    # ilość / ilosc
+    col_i = header.get("ilość palet", header.get("ilosc palet", header.get("ilosc", header.get("ilość", 2))))
+    # przewoźnik / przewoznik
+    col_p = header.get("przewoźnik", header.get("przewoznik", header.get("przewoź", header.get("przewoz", 3))))
 
     for r in range(2, ws.max_row+1):
         z = ws.cell(r, col_z).value
@@ -83,11 +86,16 @@ def _make_stamp_page(zlecenie: str, ilosc: int, przewoznik: str, width: float, h
     margin = 15 * mm
     x = margin
     y = height - margin
+
+    # alias zmiennej z ogonkami (na wypadek, gdy ktoś ma w kodzie {przewoźnik})
+    przewoźnik = przewoznik  # noqa: F821  # type: ignore
+
     c.drawString(x, y, f"ZLECENIE: {zlecenie}")
     y -= 8 * mm
     c.drawString(x, y, f"ILOŚĆ PALET: {ilosc}")
     y -= 8 * mm
-    c.drawString(x, y, f"PRZEWOŹNIK: {przewoźnik}")
+    # korzystamy z lokalnej zmiennej z ASCII, ale alias też istnieje
+    c.drawString(x, y, f"PRZEWOŹNIK: {przewoznik}")
     c.showPage()
     c.save()
     return buf.getvalue()
