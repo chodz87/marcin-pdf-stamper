@@ -6,32 +6,30 @@ import streamlit as st
 from openpyxl import load_workbook
 from PyPDF2 import PdfReader, PdfWriter
 from PyPDF2._page import PageObject
+from PyPDF2.generic import ArrayObject, NameObject
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
 st.set_page_config(page_title="Kersia PDF Stamper", page_icon="🧰", layout="centered")
-st.title("Kersia — PDF Stamper (Adobe-safe build)")
+st.title("Kersia — PDF Stamper (Adobe-safe build v3)")
 
 # ---------------- Helpers ----------------
 
 def _coerce_int(value: Any) -> int:
-    """Best-effort int coercion. Returns 0 if missing/invalid."""
     if value is None:
         return 0
-    # Guard: if someone pasted a date into "ilość", treat as invalid -> 0
     if isinstance(value, (datetime, date)):
         return 0
     if isinstance(value, bool):
         return int(value)
-    if isinstance(value, (int,)):
-        return int(value)
+    if isinstance(value, int):
+        return value
     if isinstance(value, float):
         if value != value:  # NaN
             return 0
         return int(round(value))
-    # strings -> pick first integer found
     s = str(value).strip()
     if not s:
         return 0
@@ -46,7 +44,6 @@ def _to_str(v: Any) -> str:
     return str(v)
 
 def _parse_excel(excel_bytes: bytes) -> List[Tuple[str, int, str]]:
-    """Return rows of (zlecenie, ilosc_palet, przewoznik). Robust to dates in cells."""
     wb = load_workbook(io.BytesIO(excel_bytes), data_only=True)
     ws = wb.active
     rows: List[Tuple[str, int, str]] = []
@@ -77,7 +74,6 @@ def _register_fonts():
     return "Helvetica"
 
 def _make_stamp_page(zlecenie: str, ilosc: int, przewoznik: str, width: float, height: float) -> bytes:
-    from reportlab.pdfgen import canvas
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=(width, height), bottomup=True)
     font_name = _register_fonts()
@@ -99,12 +95,11 @@ def _make_stamp_page(zlecenie: str, ilosc: int, przewoznik: str, width: float, h
     return buf.getvalue()
 
 def _normalize_contents(page: PageObject):
-    from PyPDF2.generic import ArrayObject
-    contents = page.get("/Contents")
+    contents = page.get(NameObject("/Contents"))
     if contents is None:
         return
     if not isinstance(contents, ArrayObject):
-        page["/Contents"] = ArrayObject([contents])
+        page[NameObject("/Contents")] = ArrayObject([contents])
 
 def annotate_pdf(pdf_bytes: bytes, excel_bytes: bytes, max_per_sheet: int = 3) -> bytes:
     reader = PdfReader(io.BytesIO(pdf_bytes), strict=False)
@@ -135,7 +130,6 @@ def annotate_pdf(pdf_bytes: bytes, excel_bytes: bytes, max_per_sheet: int = 3) -
         writer.add_page(page)
 
     while data_idx < len(rows):
-        # create blank page of last size
         w = float(reader.pages[-1].mediabox.width)
         h = float(reader.pages[-1].mediabox.height)
         blank = PageObject.create_blank_page(width=w, height=h)
