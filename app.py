@@ -92,14 +92,56 @@ def make_overlay(width, height, header, footer, font_size=12, margin_mm=8):
     if footer: c.drawRightString(width - m, m, footer)
     c.save(); return buf.getvalue()
 
+def make_summary_page(width, height, missing_from_pdf, missing_from_excel):
+    buf = io.BytesIO(); c = canvas.Canvas(buf, pagesize=(width, height))
+    W, H = width, height
+    try: c.setFont("Helvetica-Bold", 16)
+    except Exception: c.setFont("Helvetica", 16)
+    c.drawString(30, H-40, "RAPORT POROWNANIA DANYCH")
+
+    y = H-80
+    c.setFont("Helvetica-Bold", 12); c.drawString(30, y, "ZLECENIA Z EXCELA NIEZNALEZIONE W PDF:")
+    y -= 20; c.setFont("Helvetica-Bold", 10); c.drawString(30, y, "ZLECENIE"); 
+    y -= 12; c.setLineWidth(0.5); c.line(30, y, W-30, y); y -= 10
+    c.setFont("Helvetica", 10)
+    if not missing_from_pdf:
+        c.drawString(30, y, "(brak)"); y -= 16
+    else:
+        for num in missing_from_pdf:
+            c.drawString(30, y, str(num)); y -= 14
+            if y < 80:
+                c.showPage(); y = H-60; c.setFont("Helvetica", 10)
+
+    if y < 140:
+        c.showPage(); y = H-60
+
+    c.setFont("Helvetica-Bold", 12); c.drawString(30, y, "ZLECENIA Z PDF-A NIEZNALEZIONE W EXCELU:")
+    y -= 20; c.setFont("Helvetica-Bold", 10); c.drawString(30, y, "ZLECENIE")
+    y -= 12; c.setLineWidth(0.5); c.line(30, y, W-30, y); y -= 10
+    c.setFont("Helvetica", 10)
+    if not missing_from_excel:
+        c.drawString(30, y, "(brak)"); y -= 16
+    else:
+        for num in missing_from_excel:
+            c.drawString(30, y, str(num)); y -= 14
+            if y < 60:
+                c.showPage(); y = H-60; c.setFont("Helvetica", 10)
+
+    c.save(); return buf.getvalue()
+
 def annotate_pdf_web(pdf_bytes, xlsx_bytes, max_per_sheet):
     lookup, excel_numbers = read_excel_lookup(io.BytesIO(xlsx_bytes))
     reader = PdfReader(io.BytesIO(pdf_bytes))
     groups, page_meta, page_text_cache = {}, {}, {}
+    found_in_pdf = set(); pdf_candidates_all = set()
+
     for i, _ in enumerate(reader.pages):
         page_text = extract_text(io.BytesIO(pdf_bytes), page_numbers=[i]) or ""
         page_text_cache[i] = page_text
         cands = extract_candidates(page_text)
+        for c in cands:
+            if c in excel_numbers: found_in_pdf.add(c)
+            else: pdf_candidates_all.add(c)
         picked = next((n for n in cands if n in excel_numbers), None)
         mapped = lookup.get(picked) if picked else None
         if mapped:
@@ -125,12 +167,11 @@ def annotate_pdf_web(pdf_bytes, xlsx_bytes, max_per_sheet):
     base_crop_l = BASE_CROP_L*mm; base_crop_r = BASE_CROP_R*mm
     base_crop_t = BASE_CROP_T*mm; base_crop_b = BASE_CROP_B*mm
 
-    writer = PdfWriter(); writer.add_metadata({"/Producer": "Kersia PDF Stamper v1.5 (pypdf)"})
+    writer = PdfWriter(); writer.add_metadata({"/Producer": "Kersia PDF Stamper v1.6 (pypdf)"})
     for gkey in ordered_keys:
         idxs = groups[gkey]
         for start in range(0, len(idxs), max_per_sheet):
             batch = idxs[start:start+max_per_sheet]
-            # oblicz skale
             items, total_h = [], 0.0
             for idx in batch:
                 src = reader.pages[idx]
@@ -158,7 +199,11 @@ def annotate_pdf_web(pdf_bytes, xlsx_bytes, max_per_sheet):
             ov = PdfReader(io.BytesIO(make_overlay(W, H, *page_meta[batch[0]])))
             base_page.merge_page(ov.pages[0])
 
-    # sanitize pass in pypdf
+    excel_missing = sorted(list(excel_numbers - found_in_pdf), key=lambda x: int(x)) if excel_numbers else []
+    pdf_only = sorted(list(pdf_candidates_all - excel_numbers), key=lambda x: int(x)) if pdf_candidates_all else []
+    rep = PdfReader(io.BytesIO(make_summary_page(W, H, excel_missing, pdf_only)))
+    writer.add_page(rep.pages[0])
+
     buf = io.BytesIO(); writer.write(buf); buf.seek(0)
     r2 = PdfReader(buf, strict=False); w2 = PdfWriter()
     for p in r2.pages: w2.add_page(p)
@@ -166,8 +211,8 @@ def annotate_pdf_web(pdf_bytes, xlsx_bytes, max_per_sheet):
     return out.getvalue()
 
 # ---- UI ----
-st.set_page_config(page_title="Kersia PDF Stamper v1.5 (pypdf)", page_icon="🧰", layout="centered")
-st.title("Kersia — PDF Stamper (pypdf, bez PyMuPDF)")
+st.set_page_config(page_title="Kersia PDF Stamper v1.6 (Raport)", page_icon="🧰", layout="centered")
+st.title("Kersia — PDF Stamper (raport braków)")
 excel_file = st.file_uploader("Plik Excel:", type=["xlsx", "xlsm", "xls"])
 pdf_file = st.file_uploader("Plik PDF:", type=["pdf"])
 max_per_sheet = st.slider("Maks. stron na kartkę", 1, 6, 3, 1)
