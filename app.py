@@ -263,7 +263,7 @@ def engine_sanitize(pdf_bytes, xlsx_bytes, max_per_sheet):
             for (idx, cl, cr, ct, cb, s, dh) in items:
                 s *= down; dh *= down
                 x = margin_x - s * cl; y2 = y - dh
-                tmp = PageObject.create_blank_page(writer, W, H)
+                tmp = PageObject.create_blank_page(width=W, height=H)
                 tmp.merge_page(reader.pages[idx])
                 T = (Transformation().translate(-cl, -cb).scale(s, s).translate(x, y2))
                 tmp.add_transformation(T); base_page.merge_page(tmp)
