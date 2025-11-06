@@ -312,4 +312,4 @@ if st.button("GENERUJ PDF", type="primary", disabled=not (excel_file and pdf_fil
         st.success("Gotowe! Pobierz poniżej.")
         st.download_button("Pobierz wynik", data=data, file_name=fname, mime="application/pdf")
     except Exception as e:
-        st.error("Błąd: {}".format(e))
+        st.error("Błąd: {}".format(repr(e)))
